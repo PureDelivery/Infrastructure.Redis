@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+	<PackageId>PureDelivery.Infrastructure.Redis</PackageId>
+	<PackageVersion>1.0.0</PackageVersion>
+	<Authors>PureDelivery Team</Authors>
+	<Company>PureDelivery</Company>
+	<Product>PureDelivery Infrastructure</Product>
+	<Description>Redis implementation for PureDelivery session management with centralized configuration support</Description>
+	<PackageTags>redis;session;puredelivery;infrastructure;microservices</PackageTags>
+	<PackageProjectUrl>https://github.com/PureDelivery/PureDelivery.Infrastructure.Redis</PackageProjectUrl>
+	<RepositoryUrl>https://github.com/PureDelivery/PureDelivery.Infrastructure.Redis</RepositoryUrl>
+	<PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+	<PackageReference Include="PureDelivery.Common.Configuration" Version="1.1.0" />
+	<PackageReference Include="StackExchange.Redis" Version="2.7.33" />
+	<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+	<PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+	<PackageReference Include="System.Text.Json" Version="9.0.7" />
+	<PackageReference Include="PureDelivery.Shared.Contracts" Version="1.2.0" />
+  </ItemGroup>
+</Project>
