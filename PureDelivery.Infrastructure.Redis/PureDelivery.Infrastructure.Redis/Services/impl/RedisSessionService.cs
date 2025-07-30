@@ -2,8 +2,8 @@
 using PureDelivery.Common.Configuration.Interfaces;
 using PureDelivery.Infrastructure.Redis.Configuration;
 using PureDelivery.Shared.Contracts.Common.Services;
-using PureDelivery.Shared.Contracts.Domain.Enums;
-using PureDelivery.Shared.Contracts.DTOs.Session;
+using PureDelivery.Shared.Contracts.DTOs.Identity.Requests;
+using PureDelivery.Shared.Contracts.DTOs.SessionDTO;
 using StackExchange.Redis;
 using System.Text.Json;
 
@@ -20,9 +20,9 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
         private readonly JsonSerializerOptions _jsonOptions;
 
         public RedisSessionService(
-                    IConnectionMultiplexer redis,
-                    IConfiguration<RedisConfiguration> config,
-                    ILogger<RedisSessionService> logger)
+            IConnectionMultiplexer redis,
+            IConfiguration<RedisConfiguration> config,
+            ILogger<RedisSessionService> logger)
         {
             config.Validate();
 
@@ -38,8 +38,8 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             _logger.LogInformation("Redis Session Service initialized with prefix: {KeyPrefix}", _config.KeyPrefix);
         }
 
-        private string GetSessionKey(string sessionId) => $"{_config.KeyPrefix}{sessionId}";
-        private string GetUserSessionsKey(string userId) => $"{_config.KeyPrefix}user:{userId}";
+        private string GetSessionKey(string sessionId) => $"{_config.KeyPrefix}session:{sessionId}";
+        private string GetUserActiveSessionKey(string userId) => $"{_config.KeyPrefix}user:{userId}:active";
 
         public async Task<SessionDto?> GetSessionAsync(string sessionId)
         {
@@ -65,35 +65,47 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             }
         }
 
+        public async Task<SessionDto?> GetUserActiveSessionAsync(string userId)
+        {
+            try
+            {
+                var userSessionKey = GetUserActiveSessionKey(userId);
+                var sessionId = await _database.StringGetAsync(userSessionKey);
+
+                if (!sessionId.HasValue)
+                {
+                    _logger.LogDebug("No active session found for user {UserId}", userId);
+                    return null;
+                }
+
+                return await GetSessionAsync(sessionId!);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving active session for user {UserId}", userId);
+                return null;
+            }
+        }
+
         public async Task<SessionDto> CreateSessionAsync(string userId)
         {
             try
             {
+                // Удаляем предыдущие сессии пользователя
+                await DeleteAllUserSessionsAsync(userId);
+
                 var sessionId = Guid.NewGuid().ToString();
                 var session = new SessionDto
                 {
                     SessionId = sessionId,
-                    UserId = userId,
-                    OrderState = new OrderStateDto
-                    {
-                        Status = OrderStatus.Cart,
-                        CreatedAt = DateTime.UtcNow,
-                        LastUpdated = DateTime.UtcNow,
-                        Items = new List<OrderItemSessionDto>(),
-                        DeliveryStatus = DeliveryStatus.Pending
-                    }
+                    UserId = userId
                 };
 
-                var key = GetSessionKey(sessionId);
-                var sessionJson = JsonSerializer.Serialize(session, _jsonOptions);
-                var expiry = TimeSpan.FromHours(_config.SessionExpirationHours);
+                await SaveSessionAsync(session);
 
-                await _database.StringSetAsync(key, sessionJson, expiry);
-
-                // Добавляем сессию в список пользователя
-                var userSessionsKey = GetUserSessionsKey(userId);
-                await _database.SetAddAsync(userSessionsKey, sessionId);
-                await _database.KeyExpireAsync(userSessionsKey, expiry);
+                // Сохраняем ссылку на активную сессию пользователя
+                var userSessionKey = GetUserActiveSessionKey(userId);
+                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromHours(_config.SessionExpirationHours));
 
                 _logger.LogInformation("Created new session {SessionId} for user {UserId}", sessionId, userId);
                 return session;
@@ -105,258 +117,67 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             }
         }
 
-        public async Task<bool> UpdateOrderStateAsync(string sessionId, OrderStateDto orderState)
+        public async Task<SessionDto> AddCustomerSessionDataAsync(string sessionId, CustomerSessionDto customerData)
         {
             try
             {
                 var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                orderState.LastUpdated = DateTime.UtcNow;
-                session.OrderState = orderState;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating order state for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdateRestaurantAsync(string sessionId, RestaurantSessionDto restaurant)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Restaurant = restaurant;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating restaurant for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> AddItemToCartAsync(string sessionId, OrderItemSessionDto item)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Items ??= new List<OrderItemSessionDto>();
-
-                // Проверяем, есть ли уже такой товар в корзине (по ID и опциям)
-                var existingItem = session.OrderState.Items.FirstOrDefault(i =>
-                    i.Id == item.Id &&
-                    AreOptionsEqual(i.SelectedOptions, item.SelectedOptions) &&
-                    i.SpecialInstructions == item.SpecialInstructions);
-
-                if (existingItem != null)
+                if (session == null)
                 {
-                    existingItem.Quantity += item.Quantity;
-                }
-                else
-                {
-                    session.OrderState.Items.Add(item);
+                    _logger.LogWarning("Session {SessionId} not found", sessionId);
+                    throw new InvalidOperationException($"Session {sessionId} not found");
                 }
 
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error adding item to cart for session {SessionId}", sessionId);
-                return false;
-            }
-        }
+                // Добавляем данные клиента в существующую сессию
+                session.CustomerSessionDto = customerData;
 
-        public async Task<bool> RemoveItemFromCartAsync(string sessionId, string itemId)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
+                var success = await SaveSessionAsync(session);
 
-                if (session.OrderState.Items != null)
+                if (!success)
                 {
-                    session.OrderState.Items = session.OrderState.Items.Where(i => i.Id != itemId).ToList();
-                    session.OrderState.LastUpdated = DateTime.UtcNow;
+                    _logger.LogError("Failed to save session {SessionId} with customer data", sessionId);
+                    throw new InvalidOperationException($"Failed to save session {sessionId}");
                 }
 
-                return await SaveSessionAsync(session);
+                _logger.LogInformation("Added customer data to existing session {SessionId}", sessionId);
+
+                return session;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error removing item from cart for session {SessionId}", sessionId);
-                return false;
+                _logger.LogError(ex, "Error adding customer data to session {SessionId}", sessionId);
+                throw;
             }
         }
 
-        public async Task<bool> UpdateItemQuantityAsync(string sessionId, string itemId, int quantity)
+        public async Task<SessionDto> UpdateCustomerDataAsync(string sessionId, CustomerSessionDto customerData)
         {
             try
             {
                 var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                var item = session.OrderState.Items?.FirstOrDefault(i => i.Id == itemId);
-                if (item == null) return false;
-
-                if (quantity <= 0)
+                if (session == null)
                 {
-                    return await RemoveItemFromCartAsync(sessionId, itemId);
+                    _logger.LogWarning("Session {SessionId} not found for update", sessionId);
+                    throw new InvalidOperationException($"Session {sessionId} not found");
                 }
 
-                item.Quantity = quantity;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-                return await SaveSessionAsync(session);
+                session.CustomerSessionDto = customerData;
+
+                var success = await SaveSessionAsync(session);
+
+                if (!success)
+                {
+                    _logger.LogError("Failed to update session {SessionId} with customer data", sessionId);
+                    throw new InvalidOperationException($"Failed to update session {sessionId}");
+                }
+
+                _logger.LogInformation("Updated customer data in session {SessionId}", sessionId);
+                return session;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error updating item quantity for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> ClearCartAsync(string sessionId)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Items = new List<OrderItemSessionDto>();
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error clearing cart for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdateDeliveryInfoAsync(string sessionId, DeliveryInfoDto deliveryInfo)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Delivery = deliveryInfo;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating delivery info for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdatePaymentInfoAsync(string sessionId, PaymentInfoDto paymentInfo)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Payment = paymentInfo;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating payment info for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdateOrderStatusAsync(string sessionId, OrderStatus status)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Status = status;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating order status for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> AssignCourierAsync(string sessionId, CourierSessionDto courier)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.Courier = courier;
-                session.OrderState.DeliveryStatus = DeliveryStatus.CourierAssigned;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error assigning courier for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdateCourierLocationAsync(string sessionId, CourierLocationDto location)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null || session.OrderState.Courier == null) return false;
-
-                location.LastUpdated = DateTime.UtcNow;
-                session.OrderState.Courier.Location = location;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating courier location for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<bool> UpdateDeliveryStatusAsync(string sessionId, DeliveryStatus status)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.DeliveryStatus = status;
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating delivery status for session {SessionId}", sessionId);
-                return false;
+                _logger.LogError(ex, "Error updating customer data for session {SessionId}", sessionId);
+                throw;
             }
         }
 
@@ -365,16 +186,18 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             try
             {
                 var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
+                if (session == null)
+                {
+                    return false;
+                }
 
-                var key = GetSessionKey(sessionId);
-                await _database.KeyDeleteAsync(key);
+                var sessionKey = GetSessionKey(sessionId);
+                var userSessionKey = GetUserActiveSessionKey(session.UserId);
 
-                // Удаляем из списка пользователя
-                var userSessionsKey = GetUserSessionsKey(session.UserId);
-                await _database.SetRemoveAsync(userSessionsKey, sessionId);
+                await _database.KeyDeleteAsync(sessionKey);
+                await _database.KeyDeleteAsync(userSessionKey);
 
-                _logger.LogInformation("Deleted session {SessionId}", sessionId);
+                _logger.LogInformation("Deleted session {SessionId} for user {UserId}", sessionId, session.UserId);
                 return true;
             }
             catch (Exception ex)
@@ -384,64 +207,78 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             }
         }
 
-        public async Task<bool> SessionExistsAsync(string sessionId)
+        public async Task<bool> DeleteAllUserSessionsAsync(string userId)
         {
             try
             {
-                var key = GetSessionKey(sessionId);
-                return await _database.KeyExistsAsync(key);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error checking session existence {SessionId}", sessionId);
-                return false;
-            }
-        }
+                var userSessionKey = GetUserActiveSessionKey(userId);
+                var sessionId = await _database.StringGetAsync(userSessionKey);
 
-        public async Task<bool> UpdateLastActivityAsync(string sessionId)
-        {
-            try
-            {
-                var session = await GetSessionAsync(sessionId);
-                if (session == null) return false;
-
-                session.OrderState.LastUpdated = DateTime.UtcNow;
-                return await SaveSessionAsync(session);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating last activity for session {SessionId}", sessionId);
-                return false;
-            }
-        }
-
-        public async Task<List<SessionDto>> GetUserSessionsAsync(string userId)
-        {
-            try
-            {
-                var userSessionsKey = GetUserSessionsKey(userId);
-                var sessionIds = await _database.SetMembersAsync(userSessionsKey);
-
-                var sessions = new List<SessionDto>();
-                foreach (var sessionId in sessionIds)
+                if (sessionId.HasValue)
                 {
-                    var session = await GetSessionAsync(sessionId!);
-                    if (session != null)
-                    {
-                        sessions.Add(session);
-                    }
+                    var sessionKey = GetSessionKey(sessionId!);
+                    await _database.KeyDeleteAsync(sessionKey);
+                    await _database.KeyDeleteAsync(userSessionKey);
+
+                    _logger.LogInformation("Deleted all sessions for user {UserId}", userId);
                 }
 
-                return sessions;
+                return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting user sessions for user {UserId}", userId);
-                return new List<SessionDto>();
+                _logger.LogError(ex, "Error deleting all sessions for user {UserId}", userId);
+                return false;
             }
         }
 
-        private async Task<bool> SaveSessionAsync(SessionDto session)
+        // В вашем SessionService добавьте этот метод:
+
+        public async Task<SessionValidationResult> IsSessionValidAsync(
+            string sessionId,
+            string currentIpAddress,
+            string currentUserAgent)
+        {
+            try
+            {
+                // Получаем сессию
+                var session = await GetSessionAsync(sessionId);
+                if (session == null)
+                {
+                    _logger.LogWarning("Session {SessionId} not found", sessionId);
+                    return SessionValidationResult.Invalid("Session not found");
+                }
+
+                // Проверяем IP адрес
+                if (session.IpAddress != currentIpAddress)
+                {
+                    _logger.LogWarning("IP mismatch for session {SessionId}: stored {StoredIP}, current {CurrentIP}",
+                        sessionId, session.IpAddress, currentIpAddress);
+                    return SessionValidationResult.Invalid("IP address mismatch");
+                }
+
+                // Проверяем User Agent
+                if (session.UserAgent != currentUserAgent)
+                {
+                    _logger.LogWarning("User Agent mismatch for session {SessionId}: stored {StoredUA}, current {CurrentUA}",
+                        sessionId, session.UserAgent?.Substring(0, Math.Min(session.UserAgent.Length, 50)),
+                        currentUserAgent?.Substring(0, Math.Min(currentUserAgent?.Length ?? 0, 50)));
+                    return SessionValidationResult.Invalid("User Agent mismatch");
+                }
+
+                _logger.LogDebug("Session {SessionId} validated successfully for user {UserId}",
+                    sessionId, session.UserId);
+
+                return SessionValidationResult.Valid(session.UserId, session.CustomerSessionDto);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating session {SessionId}", sessionId);
+                return SessionValidationResult.Invalid("Session validation error");
+            }
+        }
+
+        public async Task<bool> SaveSessionAsync(SessionDto session)
         {
             try
             {
@@ -459,29 +296,37 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             }
         }
 
-        /// <summary>
-        /// Сравнивает два списка опций меню на равенство
-        /// </summary>
-        private static bool AreOptionsEqual(List<MenuItemOptionDto> options1, List<MenuItemOptionDto> options2)
+        public async Task<SessionDto> CreateSessionWithDataAsync(string userId, CustomerSessionDto customerData, AuthenticateRequest authenticateRequest)
         {
-            if (options1.Count != options2.Count) return false;
-
-            // Сортируем по ID для корректного сравнения
-            var sorted1 = options1.OrderBy(o => o.Id).ToList();
-            var sorted2 = options2.OrderBy(o => o.Id).ToList();
-
-            for (int i = 0; i < sorted1.Count; i++)
+            try
             {
-                if (sorted1[i].Id != sorted2[i].Id ||
-                    sorted1[i].Name != sorted2[i].Name ||
-                    sorted1[i].Type != sorted2[i].Type ||
-                    sorted1[i].AdditionalPrice != sorted2[i].AdditionalPrice)
-                {
-                    return false;
-                }
-            }
+                // Удаляем предыдущие сессии пользователя
+                await DeleteAllUserSessionsAsync(userId);
 
-            return true;
+                var sessionId = Guid.NewGuid().ToString();
+                var session = new SessionDto
+                {
+                    SessionId = sessionId,
+                    UserId = userId,
+                    CustomerSessionDto = customerData,
+                    IpAddress = authenticateRequest.UserIP,
+                    UserAgent = authenticateRequest.UserAgent
+                };
+
+                await SaveSessionAsync(session);
+
+                // Сохраняем ссылку на активную сессию пользователя
+                var userSessionKey = GetUserActiveSessionKey(userId);
+                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromHours(_config.SessionExpirationHours));
+
+                _logger.LogInformation("Created new session with data {SessionId} for user {UserId}", sessionId, userId);
+                return session;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating session with data for user {UserId}", userId);
+                throw;
+            }
         }
     }
 }
