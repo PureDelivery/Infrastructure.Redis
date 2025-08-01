@@ -11,7 +11,7 @@ namespace PureDelivery.Infrastructure.Redis.Configuration
         [Required]
         public string ConnectionString { get; set; } = string.Empty;
         public string KeyPrefix { get; set; } = "puredelivery:session:";
-        public int SessionExpirationHours { get; set; } = 24;
+        public int SessionExpirationMinutes { get; set; } = 5;
         public int Database { get; set; } = 0;
         public int ConnectTimeout { get; set; } = 5000;
         public int CommandTimeout { get; set; } = 5000;
@@ -24,8 +24,8 @@ namespace PureDelivery.Infrastructure.Redis.Configuration
             if (string.IsNullOrWhiteSpace(ConnectionString))
                 throw new ArgumentException("Redis connection string cannot be empty", nameof(ConnectionString));
 
-            if (SessionExpirationHours <= 0 || SessionExpirationHours > 168) // 7 дней макс
-                throw new ArgumentOutOfRangeException(nameof(SessionExpirationHours),
+            if (SessionExpirationMinutes <= 0 || SessionExpirationMinutes > 168) // 7 дней макс
+                throw new ArgumentOutOfRangeException(nameof(SessionExpirationMinutes),
                     "Session expiration must be between 1 and 168 hours");
 
             if (Database < 0 || Database > 15)

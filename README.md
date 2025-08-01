@@ -1,6 +1,9 @@
 # Infrastructure.Redis
 Redis implementation for PureDelivery session management with support for centralized configuration and microservices architecture.
 
+[1.3.2] [01.08.2025]
+- Config field SessionExpiration changed to minutes
+
 [1.3.1] [15.07.2025]
 - RedisService to receive auth request
 - Nuget upgrade

@@ -105,7 +105,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
 
                 // Сохраняем ссылку на активную сессию пользователя
                 var userSessionKey = GetUserActiveSessionKey(userId);
-                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromHours(_config.SessionExpirationHours));
+                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromMinutes(_config.SessionExpirationMinutes));
 
                 _logger.LogInformation("Created new session {SessionId} for user {UserId}", sessionId, userId);
                 return session;
@@ -284,7 +284,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             {
                 var key = GetSessionKey(session.SessionId);
                 var sessionJson = JsonSerializer.Serialize(session, _jsonOptions);
-                var expiry = TimeSpan.FromHours(_config.SessionExpirationHours);
+                var expiry = TimeSpan.FromMinutes(_config.SessionExpirationMinutes);
 
                 await _database.StringSetAsync(key, sessionJson, expiry);
                 return true;
@@ -317,7 +317,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
 
                 // Сохраняем ссылку на активную сессию пользователя
                 var userSessionKey = GetUserActiveSessionKey(userId);
-                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromHours(_config.SessionExpirationHours));
+                await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromMinutes(_config.SessionExpirationMinutes));
 
                 _logger.LogInformation("Created new session with data {SessionId} for user {UserId}", sessionId, userId);
                 return session;
