@@ -2,6 +2,7 @@
 using PureDelivery.Common.Configuration.Interfaces;
 using PureDelivery.Infrastructure.Redis.Configuration;
 using PureDelivery.Shared.Contracts.Common.Services;
+using PureDelivery.Shared.Contracts.Domain.Enums;
 using PureDelivery.Shared.Contracts.DTOs.Identity.Requests;
 using PureDelivery.Shared.Contracts.DTOs.SessionDTO;
 using StackExchange.Redis;
@@ -269,7 +270,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
                 _logger.LogDebug("Session {SessionId} validated successfully for user {UserId}",
                     sessionId, session.UserId);
 
-                return SessionValidationResult.Valid(session.UserId, session.CustomerSessionDto);
+                return SessionValidationResult.Valid(session.UserId, session.CustomerSessionDto, session.Role);
             }
             catch (Exception ex)
             {
@@ -296,7 +297,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
             }
         }
 
-        public async Task<SessionDto> CreateSessionWithDataAsync(string userId, CustomerSessionDto customerData, AuthenticateRequest authenticateRequest)
+        public async Task<SessionDto> CreateSessionWithDataAsync(string userId, CustomerSessionDto? customerData, AuthenticateRequest authenticateRequest, UserRole role = UserRole.Customer)
         {
             try
             {
@@ -308,6 +309,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
                 {
                     SessionId = sessionId,
                     UserId = userId,
+                    Role = role,
                     CustomerSessionDto = customerData,
                     IpAddress = authenticateRequest.UserIP,
                     UserAgent = authenticateRequest.UserAgent
@@ -319,7 +321,7 @@ namespace PureDelivery.Infrastructure.Redis.Services.impl
                 var userSessionKey = GetUserActiveSessionKey(userId);
                 await _database.StringSetAsync(userSessionKey, sessionId, TimeSpan.FromMinutes(_config.SessionExpirationMinutes));
 
-                _logger.LogInformation("Created new session with data {SessionId} for user {UserId}", sessionId, userId);
+                _logger.LogInformation("Created new session with data {SessionId} for user {UserId} with role {Role}", sessionId, userId, role);
                 return session;
             }
             catch (Exception ex)
